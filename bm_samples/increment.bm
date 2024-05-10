@@ -1,0 +1,4 @@
+increment: function integer ( x: integer ) = {
+    y: integer = x + 1;
+    return y;
+}
