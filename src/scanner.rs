@@ -1,6 +1,9 @@
+use std::str::FromStr;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind<'a> {
     Ident(&'a str),
+    Keyword(Keyword),
     Colon,
     Whitespace,
     AssignmentOp,
@@ -34,10 +37,63 @@ pub enum TokenKind<'a> {
     RightBracket,
     LineComment(&'a str),
     BlockComment(&'a str),
-    Invalid(&'a str),
+    Invalid(Invalid),
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum Keyword {
+    Array,
+    Boolean,
+    Char,
+    Else,
+    False,
+    For,
+    Function,
+    If,
+    Integer,
+    Print,
+    Return,
+    String,
+    True,
+    Void,
+    While,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Invalid {
+    CharLiteralTooLong,
+    EmptyCharLiteral,
+    UnexpectedChar,
+    UnterminatedBlockComment,
+    UnterminatedCharLiteral,
+    UnterminatedStringLiteral,
+}
+
+impl FromStr for Keyword {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "array" => Keyword::Array,
+            "boolean" => Keyword::Boolean,
+            "char" => Keyword::Char,
+            "else" => Keyword::Else,
+            "false" => Keyword::False,
+            "for" => Keyword::For,
+            "function" => Keyword::Function,
+            "if" => Keyword::If,
+            "integer" => Keyword::Integer,
+            "print" => Keyword::Print,
+            "return" => Keyword::Return,
+            "string" => Keyword::String,
+            "true" => Keyword::True,
+            "void" => Keyword::Void,
+            "while" => Keyword::While,
+            _ => return Err(()),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq)]
 pub struct SpanBound {
     line: usize,
     col: usize,
@@ -52,6 +108,15 @@ impl SpanBound {
 impl From<(usize, usize)> for SpanBound {
     fn from(value: (usize, usize)) -> Self {
         Self::new(value.0, value.1)
+    }
+}
+
+impl Ord for SpanBound {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.line.cmp(&other.line) {
+            std::cmp::Ordering::Equal => self.col.cmp(&other.col),
+            ord => ord,
+        }
     }
 }
 
@@ -124,10 +189,9 @@ impl<'a> Cursor<'a> {
         }
 
         if !self.remaining_src.is_empty() {
-            let invalid = &self.remaining_src[..1];
             let span = self.consume_src(1);
             Some(Token {
-                kind: TokenKind::Invalid(invalid),
+                kind: TokenKind::Invalid(Invalid::UnexpectedChar),
                 span,
             })
         } else {
@@ -224,7 +288,7 @@ impl<'a> Cursor<'a> {
                 let remaining = &self.remaining_src[..];
                 let span = self.consume_src(remaining.len());
                 Some(Token {
-                    kind: TokenKind::Invalid(remaining),
+                    kind: TokenKind::Invalid(Invalid::UnterminatedBlockComment),
                     span,
                 })
             }
@@ -293,8 +357,13 @@ impl<'a> Cursor<'a> {
             }
             let ident_src = &self.remaining_src[..ident_len];
             let ident_span = self.consume_src(ident_len);
+            let kind = if let Some(keyword) = convert_ident_to_keyword(ident_src) {
+                TokenKind::Keyword(keyword)
+            } else {
+                TokenKind::Ident(ident_src)
+            };
             Some(Token {
-                kind: TokenKind::Ident(ident_src),
+                kind,
                 span: ident_span,
             })
         } else {
@@ -351,18 +420,16 @@ impl<'a> Cursor<'a> {
         if src_iter.next()? == '\'' {
             let escaped = match src_iter.next() {
                 None | Some('\n' | '\r') => {
-                    let src = &self.remaining_src[..1];
                     let span = self.consume_src(1);
                     return Some(Token {
-                        kind: TokenKind::Invalid(src),
+                        kind: TokenKind::Invalid(Invalid::UnterminatedCharLiteral),
                         span,
                     });
                 }
                 Some('\'') => {
-                    let src = &self.remaining_src[..2];
                     let span = self.consume_src(2);
                     return Some(Token {
-                        kind: TokenKind::Invalid(src),
+                        kind: TokenKind::Invalid(Invalid::EmptyCharLiteral),
                         span,
                     });
                 }
@@ -393,13 +460,13 @@ impl<'a> Cursor<'a> {
                     })
                 } else {
                     Some(Token {
-                        kind: TokenKind::Invalid(literal_src),
+                        kind: TokenKind::Invalid(Invalid::CharLiteralTooLong),
                         span,
                     })
                 }
             } else {
                 Some(Token {
-                    kind: TokenKind::Invalid(literal_src),
+                    kind: TokenKind::Invalid(Invalid::UnterminatedCharLiteral),
                     span,
                 })
             }
@@ -437,7 +504,7 @@ impl<'a> Cursor<'a> {
                 })
             } else {
                 Some(Token {
-                    kind: TokenKind::Invalid(literal),
+                    kind: TokenKind::Invalid(Invalid::UnterminatedStringLiteral),
                     span,
                 })
             }
@@ -456,6 +523,13 @@ pub fn scan(source: &str) -> Vec<Token> {
     }
 
     tokens
+}
+
+fn convert_ident_to_keyword(ident: &str) -> Option<Keyword> {
+    match Keyword::from_str(ident) {
+        Ok(key) => Some(key),
+        Err(()) => None,
+    }
 }
 
 #[cfg(test)]
@@ -489,39 +563,39 @@ mod tests {
         let expected_tokens: Vec<Token> = vec![
             Token {
                 kind: TokenKind::Ident("x"),
-                span: Span::from(((0, 0), (0, 1))),
+                span: Span::from(((1, 0), (1, 1))),
             },
             Token {
                 kind: TokenKind::Colon,
-                span: Span::from(((0, 1), (0, 2))),
+                span: Span::from(((1, 1), (1, 2))),
             },
             Token {
                 kind: TokenKind::Whitespace,
-                span: Span::from(((0, 2), (0, 3))),
+                span: Span::from(((1, 2), (1, 3))),
             },
             Token {
-                kind: TokenKind::Ident("integer"),
-                span: Span::from(((0, 3), (0, 10))),
+                kind: TokenKind::Keyword(Keyword::Integer),
+                span: Span::from(((1, 3), (1, 10))),
             },
             Token {
                 kind: TokenKind::Whitespace,
-                span: Span::from(((0, 10), (0, 11))),
+                span: Span::from(((1, 10), (1, 11))),
             },
             Token {
                 kind: TokenKind::AssignmentOp,
-                span: Span::from(((0, 11), (0, 12))),
+                span: Span::from(((1, 11), (1, 12))),
             },
             Token {
                 kind: TokenKind::Whitespace,
-                span: Span::from(((0, 12), (0, 13))),
+                span: Span::from(((1, 12), (1, 13))),
             },
             Token {
                 kind: TokenKind::IntegerLiteral("65"),
-                span: Span::from(((0, 13), (0, 15))),
+                span: Span::from(((1, 13), (1, 15))),
             },
             Token {
                 kind: TokenKind::Semicolon,
-                span: Span::from(((0, 15), (0, 16))),
+                span: Span::from(((1, 15), (1, 16))),
             },
         ];
 
@@ -535,39 +609,39 @@ mod tests {
         let expected_tokens: Vec<Token> = vec![
             Token {
                 kind: TokenKind::Ident("y"),
-                span: Span::from(((0, 0), (0, 1))),
+                span: Span::from(((1, 0), (1, 1))),
             },
             Token {
                 kind: TokenKind::Colon,
-                span: Span::from(((0, 1), (0, 2))),
+                span: Span::from(((1, 1), (1, 2))),
             },
             Token {
                 kind: TokenKind::Whitespace,
-                span: Span::from(((0, 2), (0, 3))),
+                span: Span::from(((1, 2), (1, 3))),
             },
             Token {
-                kind: TokenKind::Ident("char"),
-                span: Span::from(((0, 3), (0, 7))),
+                kind: TokenKind::Keyword(Keyword::Char),
+                span: Span::from(((1, 3), (1, 7))),
             },
             Token {
                 kind: TokenKind::Whitespace,
-                span: Span::from(((0, 7), (0, 8))),
+                span: Span::from(((1, 7), (1, 8))),
             },
             Token {
                 kind: TokenKind::AssignmentOp,
-                span: Span::from(((0, 8), (0, 9))),
+                span: Span::from(((1, 8), (1, 9))),
             },
             Token {
                 kind: TokenKind::Whitespace,
-                span: Span::from(((0, 9), (0, 10))),
+                span: Span::from(((1, 9), (1, 10))),
             },
             Token {
                 kind: TokenKind::CharLiteral("'A'"),
-                span: Span::from(((0, 10), (0, 13))),
+                span: Span::from(((1, 10), (1, 13))),
             },
             Token {
                 kind: TokenKind::Semicolon,
-                span: Span::from(((0, 13), (0, 14))),
+                span: Span::from(((1, 13), (1, 14))),
             },
         ];
 
