@@ -94,7 +94,7 @@ struct Cursor<'a> {
 impl<'a> Cursor<'a> {
     pub fn new(src: &'a str) -> Self {
         Cursor {
-            current_line: 0,
+            current_line: 1,
             current_col: 0,
             remaining_src: src,
         }
@@ -262,8 +262,6 @@ impl<'a> Cursor<'a> {
         while let Some(ch) = src_iter.next() {
             if ch == '\n' {
                 whitespace_len += 1;
-                self.current_col = 0;
-                self.current_line += 1;
             } else if ch.is_ascii_whitespace() {
                 whitespace_len += 1;
             } else {
