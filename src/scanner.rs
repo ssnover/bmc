@@ -7,6 +7,7 @@ pub enum TokenKind<'a> {
     Semicolon,
     IntegerLiteral(&'a str),
     CharLiteral(&'a str),
+    StringLiteral(&'a str),
     LogicalAnd,
     LogicalOr,
     PostIncrement,
@@ -31,6 +32,9 @@ pub enum TokenKind<'a> {
     RightParen,
     LeftBracket,
     RightBracket,
+    LineComment(&'a str),
+    BlockComment(&'a str),
+    Invalid(&'a str),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,9 +92,9 @@ struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-    pub fn new(src: &'a str, line_number: usize) -> Self {
+    pub fn new(src: &'a str) -> Self {
         Cursor {
-            current_line: line_number,
+            current_line: 0,
             current_col: 0,
             remaining_src: src,
         }
@@ -106,16 +110,52 @@ impl<'a> Cursor<'a> {
         if let Some(token) = self.get_whitespace() {
             return Some(token);
         }
+        if let Some(token) = self.get_block_comment() {
+            return Some(token);
+        }
+        if let Some(token) = self.get_line_comment() {
+            return Some(token);
+        }
         if let Some(token) = self.get_multichar_op() {
             return Some(token);
         }
-        self.get_simple_token()
+        if let Some(token) = self.get_simple_token() {
+            return Some(token);
+        }
+
+        if !self.remaining_src.is_empty() {
+            let invalid = &self.remaining_src[..1];
+            let span = self.consume_src(1);
+            Some(Token {
+                kind: TokenKind::Invalid(invalid),
+                span,
+            })
+        } else {
+            None
+        }
     }
 
     fn consume_src(&mut self, len: usize) -> Span {
+        let src = &self.remaining_src[..len];
+        let newlines =
+            src.chars().into_iter().fold(
+                0usize,
+                |count, ch| if ch == '\n' { count + 1 } else { count },
+            );
+
         let start = SpanBound::new(self.current_line, self.current_col);
-        let end = SpanBound::new(self.current_line, self.current_col + len);
-        self.current_col += len;
+        let end = if newlines != 0 {
+            let last_newline = src.rfind('\n').unwrap();
+            let chars_after_last_newline = len - (last_newline + 1);
+            SpanBound::new(
+                self.current_line + newlines,
+                self.current_col + chars_after_last_newline,
+            )
+        } else {
+            SpanBound::new(self.current_line, self.current_col + len)
+        };
+        self.current_line = end.line;
+        self.current_col = end.col;
         self.remaining_src = &self.remaining_src[len..];
         Span::new(start, end)
     }
@@ -170,11 +210,61 @@ impl<'a> Cursor<'a> {
         })
     }
 
+    fn get_block_comment(&mut self) -> Option<Token<'a>> {
+        let mut src_iter = self.remaining_src.chars().into_iter();
+        if let (Some('/'), Some('*')) = (src_iter.next(), src_iter.next()) {
+            if let Some(end_of_block) = self.remaining_src.find("*/") {
+                let block_comment = &self.remaining_src[..end_of_block + 2];
+                let span = self.consume_src(block_comment.len());
+                Some(Token {
+                    kind: TokenKind::BlockComment(block_comment),
+                    span,
+                })
+            } else {
+                let remaining = &self.remaining_src[..];
+                let span = self.consume_src(remaining.len());
+                Some(Token {
+                    kind: TokenKind::Invalid(remaining),
+                    span,
+                })
+            }
+        } else {
+            None
+        }
+    }
+
+    fn get_line_comment(&mut self) -> Option<Token<'a>> {
+        let mut src_iter = self.remaining_src.chars().into_iter();
+        match (src_iter.next()?, src_iter.next()?) {
+            ('/', '/') => {
+                let src = if let Some(newline) = self.remaining_src.find('\n') {
+                    if let Some(cr) = self.remaining_src[..newline].find('\r') {
+                        &self.remaining_src[..cr]
+                    } else {
+                        &self.remaining_src[..newline]
+                    }
+                } else {
+                    &self.remaining_src[..]
+                };
+                let span = self.consume_src(src.len());
+                Some(Token {
+                    kind: TokenKind::LineComment(src),
+                    span,
+                })
+            }
+            _ => None,
+        }
+    }
+
     fn get_whitespace(&mut self) -> Option<Token<'a>> {
         let mut src_iter = self.remaining_src.chars().into_iter();
         let mut whitespace_len = 0;
         while let Some(ch) = src_iter.next() {
-            if ch.is_ascii_whitespace() {
+            if ch == '\n' {
+                whitespace_len += 1;
+                self.current_col = 0;
+                self.current_line += 1;
+            } else if ch.is_ascii_whitespace() {
                 whitespace_len += 1;
             } else {
                 break;
@@ -193,9 +283,10 @@ impl<'a> Cursor<'a> {
     }
 
     fn get_ident(&mut self) -> Option<Token<'a>> {
-        if Self::is_valid_ident_start(self.remaining_src.chars().into_iter().next()?) {
+        let mut src_iter = self.remaining_src.chars().into_iter();
+        if Self::is_valid_ident_start(src_iter.next()?) {
             let mut ident_len = 1;
-            for ch in self.remaining_src[1..].chars().into_iter() {
+            for ch in src_iter {
                 if Self::is_valid_ident(ch) {
                     ident_len += 1;
                 } else {
@@ -224,10 +315,12 @@ impl<'a> Cursor<'a> {
     fn get_literal(&mut self) -> Option<Token<'a>> {
         if let Some(token) = self.get_int_literal() {
             return Some(token);
-        } else {
-            if let Some(token) = self.get_char_literal() {
-                return Some(token);
-            }
+        }
+        if let Some(token) = self.get_char_literal() {
+            return Some(token);
+        }
+        if let Some(token) = self.get_string_literal() {
+            return Some(token);
         }
         None
     }
@@ -258,15 +351,97 @@ impl<'a> Cursor<'a> {
     fn get_char_literal(&mut self) -> Option<Token<'a>> {
         let mut src_iter = self.remaining_src.chars().into_iter();
         if src_iter.next()? == '\'' {
-            if src_iter.skip(1).next()? == '\'' {
-                let literal_src = &self.remaining_src[..3];
-                let literal_span = self.consume_src(3);
+            let escaped = match src_iter.next() {
+                None | Some('\n' | '\r') => {
+                    let src = &self.remaining_src[..1];
+                    let span = self.consume_src(1);
+                    return Some(Token {
+                        kind: TokenKind::Invalid(src),
+                        span,
+                    });
+                }
+                Some('\'') => {
+                    let src = &self.remaining_src[..2];
+                    let span = self.consume_src(2);
+                    return Some(Token {
+                        kind: TokenKind::Invalid(src),
+                        span,
+                    });
+                }
+                Some('\\') => true,
+                Some(_) => false,
+            };
+            let mut terminated = false;
+            let mut literal_len = 2;
+            while let Some(ch) = src_iter.next() {
+                literal_len += 1;
+                if ch == '\'' {
+                    terminated = true;
+                    break;
+                }
+            }
+            let literal_src = &self.remaining_src[..literal_len];
+            let span = self.consume_src(literal_len);
+            if terminated {
+                if literal_len == 3 && !escaped {
+                    Some(Token {
+                        kind: TokenKind::CharLiteral(literal_src),
+                        span,
+                    })
+                } else if literal_len == 4 && escaped {
+                    Some(Token {
+                        kind: TokenKind::CharLiteral(literal_src),
+                        span,
+                    })
+                } else {
+                    Some(Token {
+                        kind: TokenKind::Invalid(literal_src),
+                        span,
+                    })
+                }
+            } else {
                 Some(Token {
-                    kind: TokenKind::CharLiteral(literal_src),
-                    span: literal_span,
+                    kind: TokenKind::Invalid(literal_src),
+                    span,
+                })
+            }
+        } else {
+            None
+        }
+    }
+
+    fn get_string_literal(&mut self) -> Option<Token<'a>> {
+        let mut src_iter = self.remaining_src.chars().into_iter();
+        if src_iter.next()? == '"' {
+            let mut string_len = 1;
+            let mut terminated = false;
+            while let Some(ch) = src_iter.next() {
+                if ch == '\n' || ch == '\r' {
+                    break;
+                }
+                string_len += 1;
+                if ch == '\\' {
+                    match src_iter.next() {
+                        Some(_) => string_len += 1,
+                        None => break,
+                    }
+                } else if ch == '"' {
+                    terminated = true;
+                    break;
+                }
+            }
+            let literal = &self.remaining_src[..string_len];
+            let span = self.consume_src(string_len);
+            if terminated {
+                Some(Token {
+                    kind: TokenKind::StringLiteral(literal),
+                    span,
                 })
             } else {
-                None
+                Some(Token {
+                    kind: TokenKind::Invalid(literal),
+                    span,
+                })
             }
         } else {
             None
@@ -276,40 +451,10 @@ impl<'a> Cursor<'a> {
 
 pub fn scan(source: &str) -> Vec<Token> {
     let mut tokens = vec![];
-    let mut line_number = 0;
-    let mut total_source_consumed = 0;
 
-    loop {
-        let remaining_src = &source[total_source_consumed..];
-        if let Some(newline) = remaining_src.find('\n') {
-            let (newline_idx, newline_len) = if let Some(cr) = remaining_src[..newline].find('\r') {
-                (cr, 2)
-            } else {
-                (newline, 1)
-            };
-            let mut cursor = Cursor::new(&remaining_src[..newline_idx], line_number);
-            while let Some(token) = cursor.get_next_token() {
-                tokens.push(token);
-            }
-            tokens.push(Token {
-                kind: TokenKind::Whitespace,
-                span: Span::new(
-                    SpanBound::new(cursor.current_line, cursor.current_col),
-                    SpanBound::new(cursor.current_line + 1, 0),
-                ),
-            });
-
-            total_source_consumed += newline_idx + newline_len;
-        } else if !remaining_src.is_empty() {
-            let mut cursor = Cursor::new(&remaining_src, line_number);
-            while let Some(token) = cursor.get_next_token() {
-                tokens.push(token);
-            }
-            total_source_consumed += remaining_src.len();
-        } else {
-            break;
-        }
-        line_number += 1;
+    let mut cursor = Cursor::new(source);
+    while let Some(token) = cursor.get_next_token() {
+        tokens.push(token);
     }
 
     tokens
@@ -318,6 +463,26 @@ pub fn scan(source: &str) -> Vec<Token> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_token_kinds_minus_whitespace(expected_kinds: &[TokenKind], tokens: &[Token]) {
+        let tokens = tokens
+            .into_iter()
+            .filter(|token| !matches!(token.kind, TokenKind::Whitespace))
+            .collect::<Vec<_>>();
+
+        expected_kinds.into_iter().zip(tokens.into_iter()).for_each(
+            |(expected_kind, actual_token)| {
+                assert_eq!(*expected_kind, actual_token.kind);
+            },
+        );
+    }
+
+    fn assert_has_invalid_tokens(tokens: &[Token]) {
+        assert!(tokens
+            .into_iter()
+            .find(|token| matches!(token.kind, TokenKind::Invalid(_)))
+            .is_some())
+    }
 
     #[test]
     fn test_integer_initialization() {
@@ -409,5 +574,101 @@ mod tests {
         ];
 
         assert_eq!(expected_tokens, tokens);
+    }
+
+    #[test]
+    fn test_cacophony_of_exclamation_and_equality() {
+        let src = "!! !! !===!!==!==!!==!=  &&";
+        let tokens = scan(src);
+
+        let expected_kinds = vec![
+            TokenKind::LogicalNot,
+            TokenKind::LogicalNot,
+            TokenKind::LogicalNot,
+            TokenKind::LogicalNot,
+            TokenKind::NotEqual,
+            TokenKind::Equal,
+            TokenKind::LogicalNot,
+            TokenKind::NotEqual,
+            TokenKind::AssignmentOp,
+            TokenKind::NotEqual,
+            TokenKind::AssignmentOp,
+            TokenKind::LogicalNot,
+            TokenKind::NotEqual,
+            TokenKind::AssignmentOp,
+            TokenKind::NotEqual,
+            TokenKind::LogicalAnd,
+        ];
+
+        assert_token_kinds_minus_whitespace(&expected_kinds, &tokens);
+    }
+
+    #[test]
+    fn test_string_madness() {
+        let src = r#"" \'\"\'\"\' ""#;
+        let tokens = scan(src);
+
+        let expected_kinds = vec![TokenKind::StringLiteral(r#"" \'\"\'\"\' ""#)];
+
+        assert_token_kinds_minus_whitespace(&expected_kinds, &tokens);
+    }
+
+    #[test]
+    fn test_simple_string_with_escape() {
+        let src = r#""\'""#;
+        let tokens = scan(src);
+
+        let expected_kinds = vec![TokenKind::StringLiteral(r#""\'""#)];
+        assert_token_kinds_minus_whitespace(&expected_kinds, &tokens);
+    }
+
+    #[test]
+    fn test_simple_char() {
+        let src = r#"'A'"#;
+        let tokens = scan(src);
+
+        let expected_kinds = vec![TokenKind::CharLiteral(r#"'A'"#)];
+        assert_token_kinds_minus_whitespace(&expected_kinds, &tokens)
+    }
+
+    #[test]
+    fn test_newlines_chars() {
+        let valid_src = "'\\n'";
+        let tokens = scan(valid_src);
+        assert_token_kinds_minus_whitespace(&[TokenKind::CharLiteral(r#"'\n'"#)], &tokens);
+
+        let invalid_src = "'\n'";
+        let tokens = scan(invalid_src);
+        assert_has_invalid_tokens(&tokens);
+    }
+
+    #[test]
+    fn test_int_literal_with_line_comment() {
+        let src = "65 // explain the number";
+        let tokens = scan(src);
+
+        assert_token_kinds_minus_whitespace(
+            &[
+                TokenKind::IntegerLiteral("65"),
+                TokenKind::LineComment("// explain the number"),
+            ],
+            &tokens,
+        );
+    }
+
+    #[test]
+    fn test_int_literal_with_simple_block_comment() {
+        let src = r#"65 /*
+            comment about num
+            */"#;
+        let tokens = scan(src);
+
+        assert_token_kinds_minus_whitespace(
+            &[
+                TokenKind::IntegerLiteral("65"),
+                TokenKind::BlockComment("/*\n            comment about num\n            */"),
+            ],
+            &tokens,
+        )
     }
 }
